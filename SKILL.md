@@ -466,11 +466,51 @@ answer that invocation). Treat `termux-battery-status`, `termux-torch` etc. as
 ## Files and storage
 
 ```bash
-df -h /sdcard                 # 120G total, ~39G free, /dev/fuse
+df -h /sdcard                 # 120G, /dev/fuse, backed by the adopted SD
 ls /sdcard                    # Alarms Android DCIM Documents Download ...
 ```
 
+The real user storage is an **adoptable SD card** (SanDisk, 127 GB):
+
+| Path | What it is |
+|---|---|
+| `/storage/emulated/0` = `/sdcard` | what apps see; must be the SD's `media/0` |
+| `/mnt/expand/3f952441-7004-4dee-8134-1bd721816a7e/media/0` | the actual files |
+| `/data/media/0` | internal fallback, nearly empty (~544 K) |
+
 Everything under `/data` is live. There are no snapshots.
+
+### The primary-storage trap
+
+If `/sdcard` suddenly shows only `Android Movies Music Pictures` and a fresh
+empty `Download`, the SD did **not** lose data - the framework stopped treating
+it as primary and bound `/storage/emulated/0` to the empty `/data/media/0`.
+
+The ROM writes `<volumes version="3">` **without** `primaryStorageUuid`. Because
+version 3 makes that attribute "valid" even when it is absent,
+`StorageManagerService.readSettingsLocked()` sets `mPrimaryStorageUuid = null`.
+A null primary compares equal to the internal volume (whose fsUuid is also
+null), so internal wins and the SD's `emulated:179,2;0` is left UNMOUNTED.
+
+`/data/adb/post-fs-data.d/00-primary-storage.sh` rewrites the opening tag with
+the SD's UUID **before zygote/system_server starts**, so the framework reads a
+correct primary. It is idempotent, snapshots the pre-boot file to
+`/data/adb/storage-prefs.xml`, and logs to `/data/adb/primary-storage.log`.
+Disable with `touch /data/adb/primary-storage.disabled`.
+
+Verify after a boot:
+
+```bash
+dumpsys mount | grep -E 'Primary storage UUID|emulated:179'
+# Primary storage UUID: 3f952441-...
+# VolumeInfo{emulated:179,2;0}: ... state=MOUNTED ... PRIMARY
+ls /sdcard/DCIM /sdcard/Download
+```
+
+Writing the attribute by hand and rebooting once is **not** enough: the
+framework rewrites `storage.xml` from memory on volume events, and the
+pre-boot state has been observed to come back without the attribute. The
+post-fs-data hook is what makes it deterministic.
 
 ## Services (runit, on the Termux side)
 
@@ -501,33 +541,58 @@ The API needs a key for anything beyond `/System/Info/public`. Ask the user.
 
 ## Boot behaviour (what comes up on its own)
 
-Two Magisk hooks in `/data/adb/service.d/` do all the work. **Both wait for the
-first unlock after a reboot** (up to 6 h), because Termux's data - and therefore
-the proot container's rootfs - lives in credential-encrypted storage and cannot
-be read before that. So the honest promise is "comes up by itself once you
-unlock the phone", not "comes up while still locked".
+Two Magisk hooks in `/data/adb/service.d/` do all the work. This device has **no
+lock credential**, so CE storage is available immediately after boot and the
+"wait for unlock" step costs nothing (`storage ready=yes waited=0s`). On a
+device with a PIN that wait is real and can last hours.
 
-### Jellyfin - yes
+### Jellyfin / sshd - yes
 
 `99-jellyfin-boot.sh`: wait `sys.boot_completed` (max 4 min) -> wait for CE
-storage -> launch the Termux activity -> `profile.d/start-services.sh` starts
-runit -> `jellyfin` service -> verify with `pgrep`, retry up to 6x -> Doze
-whitelist Termux -> start the guard.
+storage -> send Termux's **RUN_COMMAND** service a request to run
+`~/.termux/boot/start-services` -> that script takes the wake lock and starts
+`service-daemon`/runsvdir -> `sshd`, `jellyfin`, `tmdbproxy` -> verify with
+`pgrep`, retry up to 6x -> Doze whitelist Termux -> start the guard.
+
+Do **not** go back to launching `TermuxActivity` from the hook. A background
+activity start is not reliable on this ROM: the hook logged "termux launched,
+launcher restored" while nothing started, and the phone stayed dead until
+Termux was opened by hand. RUN_COMMAND starts the app's service, runs one
+script, and never shows a window.
 
 ### OpenCode - yes
 
-`98-opencode-boot.sh`: same two waits -> repair the container's `/dev`
-(`/data/adb/dev-repair.sh`) -> ask Termux to run `~/.opencode-boot.sh` through
-RUN_COMMAND -> `proot-distro login debian` -> `opencode service start`. Retries
-4x; from attempt 2 it also launches the Termux activity, because the
-service-only cold start does not always wake the app. Listens on
-`127.0.0.1:49374`. The Termux side repeats the `/dev` repair through `su`,
-because the mount has to exist before the server spawns anything.
+`98-opencode-boot.sh`: same two waits -> ask Termux to run
+`~/.opencode-boot.sh` through RUN_COMMAND. That script does, in order:
 
-Why RUN_COMMAND rather than starting proot from the hook directly: a
-root-spawned process lives in init's mount namespace and cannot see Termux's
-app data, where the container's rootfs is. Termux's `RunCommandService` runs the
-script with Termux's own mounts and uid, which is what `proot-distro` needs.
+1. `su -c 'sh /data/adb/dev-repair.sh'` - bind the phone's `/dev` nodes over
+   the container's `nodev` placeholders
+2. `su -c 'sh /data/adb/oc-binds.sh'` - idempotently bind `/proc`, `/sys`,
+   `/dev`, `/system`, `/data`, `/storage/emulated/0` and the apexes into the
+   rootfs
+3. start `service-daemon` if runit is not already up
+4. `setsid su -c 'opencode-chroot -- /root/.opencode/bin/opencode serve --service'`
+   - the same path the `opencode` command uses: real root, chroot, not
+   `proot-distro login`
+5. poll `/proc/net/tcp` for `:C0DE` (30 s)
+
+Listens on `127.0.0.1:49374`.
+
+Why root/chroot and not `proot-distro login`: proot runs as the Termux uid
+(10086) and cannot write the root-owned `~/.local/share/opencode` tree. The
+first boot attempt died with `EACCES: permission denied, mkdir
+'/root/.local/share/opencode/log'` while a manual launch worked. Root can write
+both root- and 10086-owned files, so root is the consistent choice.
+
+Why RUN_COMMAND rather than starting everything from the hook directly: the
+runit services must run as the Termux uid (10086) to see Termux's data and its
+storage view, and RUN_COMMAND is Termux's supported way to run a script in that
+context. The parts that need root escalate with `su`.
+
+`opencode-chroot` is **non-destructive**: it skips a bind that already exists
+and only unmounts what it created. Every `su` shares one mount namespace, so
+the old "unmount then rebind" version let a second run (an interactive
+`opencode`, a test) tear `/data` out from under the background server.
 
 OpenCode has no init here - no systemd, no cron - and `service.json` holds only
 a password, no autostart flag. This hook is the only thing that starts it.
@@ -540,7 +605,7 @@ a password, no autostart flag. This hook is the only thing that starts it.
 2. sets `oom_score_adj=-1000` on jellyfin, sshd, tmdbproxy, runsvdir **and the
    OpenCode server**
 3. keeps the battery between 75% and 80% while plugged in
-4. restarts OpenCode if it disappears (180 s cooldown)
+4. restarts OpenCode **or runit/sshd** if either disappears (180 s cooldown)
 
 Liveness is decided by the **listening socket**, never by process name or argv:
 `grep -qE ':C0DE [0-9A-F]{8}:0000 0A' /proc/net/tcp` (49374 = 0xC0DE). This is
@@ -567,10 +632,11 @@ touch /data/adb/opencode-autostart.disabled   # stop auto-start AND the restart
 touch /data/adb/battery-guard.disabled        # allow charging to 100%
 ```
 
-The Termux:Boot hook (`~/.termux/boot/start-services`) has **never fired** on
-this device - no `boot.log` exists. Termux:Boot is installed but its receiver
-only registers after the app is launched once. The Magisk hooks above are the
-real boot path; do not rely on Termux:Boot.
+The Termux:Boot app is installed but its receiver has **never fired** on this
+device - no `~/.termux/boot/boot.log` exists. Its hook script
+(`~/.termux/boot/start-services`) is still useful, but it is now triggered
+explicitly through RUN_COMMAND by the Magisk hooks and the guard. Do not rely
+on Termux:Boot itself.
 
 ## Network
 
@@ -610,6 +676,10 @@ real boot path; do not rely on Termux:Boot.
 | `/proc` empty, `getprop` fine but `ps`/`ls /proc` empty | container was relaunched | `phone-up` remounts proc/sys |
 | OpenCode gone after reboot | nothing starts the proot container; the Magisk hook does | check `/data/adb/opencode-boot.log`, then `touch`-remove the disable marker |
 | boot log says "already running" but nothing listens | liveness matched a shell whose argv contains the pattern | check the socket, not argv: `:C0DE` in `/proc/net/tcp` |
+| nothing starts until Termux is opened by hand | the hook launched `TermuxActivity`, which Android refused in the background | use RUN_COMMAND, not an activity start |
+| `/sdcard` looks empty after reboot | ROM wrote `storage.xml` without `primaryStorageUuid`; null primary matches internal | run `/data/adb/post-fs-data.d/00-primary-storage.sh`, check `/data/adb/primary-storage.log` |
+| boot start dies with `EACCES ... /root/.local/share/opencode` | container entered as uid 10086, tree is root-owned | start through `opencode-chroot` (root), not `proot-distro login` |
+| running server loses `/data` after an `opencode` run | old wrapper unmounted shared binds on exit | use the non-destructive `opencode-chroot`; re-run `/data/adb/oc-binds.sh` |
 | `pgrep -f 'opencode'` returns a pid that is not the server | `pgrep -f` matches its own command line; the CLI shares the name | match argv `*/opencode serve --service` over `/proc/*/cmdline` |
 | autofill sheet seems untouchable | usually the SELinux block above | prove injection on a plain widget first; `KEYCODE_BACK` / DPAD fallback |
 | button ignores tap | stale coordinates after keyboard shift, or focus needed | re-screenshot, then DPAD + `KEYCODE_DPAD_CENTER` |

@@ -32,8 +32,14 @@ agent does not spend a session rediscovering it.
 | `scripts/uidump.sh` | Dumps the Android view hierarchy (text + exact bounds) via Termux RUN_COMMAND |
 | `scripts/uitap.sh` | Taps the best-matching view by text/content-desc |
 | `scripts/dev-repair.sh` | Bind-mounts Android's real `/dev` nodes over the container's (nodev) placeholders |
-| `scripts/opencode-boot.sh` | Magisk `service.d` hook: starts the OpenCode server at boot |
-| `scripts/opencode-boot-termux.sh` | Termux side of that hook: `proot-distro login` → `opencode service start` |
+| `scripts/oc-binds.sh` | Idempotently binds `/proc`, `/sys`, `/data`, `/system`, `/storage` into the container rootfs |
+| `scripts/opencode-chroot.sh` | Enters the container as real root (non-destructive binds); used by the `opencode` command and by boot |
+| `scripts/primary-storage.sh` | Magisk `post-fs-data.d` hook: records the adopted SD as primary before system_server reads `storage.xml` |
+| `scripts/start-services.sh` | Termux-side script that starts runit (`sshd`, `jellyfin`, `tmdbproxy`) |
+| `scripts/opencode-boot.sh` | Magisk `service.d` hook: starts the OpenCode server at boot via RUN_COMMAND |
+| `scripts/opencode-boot-termux.sh` | Termux side: dev-repair + oc-binds + runit + `opencode-chroot` → `opencode serve` |
+| `scripts/jellyfin-boot.sh` | Magisk `service.d` hook: starts runit at boot via RUN_COMMAND, then the guard |
+| `scripts/jellyfin-guard.sh` | Watchdog: wakelock, OOM shielding, battery ceiling, restarts OpenCode/runit |
 
 ## Install
 
@@ -51,6 +57,7 @@ install -m 755 scripts/phone-up.sh /usr/local/bin/phone-up
 install -m 755 scripts/uidump.sh  /usr/local/bin/uidump
 install -m 755 scripts/uitap.sh   /usr/local/bin/uitap
 install -m 755 scripts/dev-repair.sh /data/adb/dev-repair.sh
+install -m 755 scripts/oc-binds.sh   /data/adb/oc-binds.sh
 ```
 
 `dev-repair.sh` is the `/dev` fix: the proot rootfs sits on Android's `nodev`
@@ -59,6 +66,11 @@ needs `/dev/null` dies with `EACCES` - including OpenCode's own shell tool. The
 script bind-mounts Android's real nodes over the container's placeholders. Run
 it as root, outside proot: `su -c 'sh /data/adb/dev-repair.sh'`.
 
+`oc-binds.sh` is the same idea for the rest of the phone (`/proc`, `/sys`,
+`/data`, `/system`, `/storage/emulated/0`). It only ever adds mounts, never
+removes them: every `su` shares one mount namespace, so a second run must not
+tear the background server's `/data` away.
+
 Boot-time auto-start (optional, needs Magisk + Termux with
 `allow-external-apps = true`):
 
@@ -66,9 +78,24 @@ Boot-time auto-start (optional, needs Magisk + Termux with
 cp scripts/opencode-boot-termux.sh /data/data/com.termux/files/home/.opencode-boot.sh
 chown 10086:10086 /data/data/com.termux/files/home/.opencode-boot.sh
 chmod 700 /data/data/com.termux/files/home/.opencode-boot.sh
-cp scripts/opencode-boot.sh /data/adb/service.d/98-opencode-boot.sh
-chmod 755 /data/adb/service.d/98-opencode-boot.sh
+cp scripts/opencode-boot.sh  /data/adb/service.d/98-opencode-boot.sh
+cp scripts/jellyfin-boot.sh  /data/adb/service.d/99-jellyfin-boot.sh
+cp scripts/jellyfin-guard.sh /data/adb/jellyfin-guard.sh
+chmod 755 /data/adb/service.d/9*.sh /data/adb/jellyfin-guard.sh
+cp scripts/start-services.sh /data/data/com.termux/files/home/.termux/boot/start-services
+chown 10086:10086 /data/data/com.termux/files/home/.termux/boot/start-services
 ```
+
+Adoptable storage: if the SD card is primary storage, the ROM may write
+`storage.xml` without `primaryStorageUuid`, which makes internal storage win and
+leaves `/sdcard` pointing at an empty `/data/media/0`. Install the hook and set
+your card's UUID in it:
+
+```bash
+cp scripts/primary-storage.sh /data/adb/post-fs-data.d/00-primary-storage.sh
+chmod 755 /data/adb/post-fs-data.d/00-primary-storage.sh
+```
+
 
 ## The bridge in one paragraph
 
