@@ -542,9 +542,18 @@ a password, no autostart flag. This hook is the only thing that starts it.
 3. keeps the battery between 75% and 80% while plugged in
 4. restarts OpenCode if it disappears (180 s cooldown)
 
-OpenCode is identified by argv (`*/opencode serve --service`), **not** by process
-name - the interactive CLI is also called `opencode`, and `pgrep -f` matches its
-own command line.
+Liveness is decided by the **listening socket**, never by process name or argv:
+`grep -qE ':C0DE [0-9A-F]{8}:0000 0A' /proc/net/tcp` (49374 = 0xC0DE). This is
+not a style preference - see the trap below.
+
+The argv scan it replaced looked for `/opencode serve --service` in
+`/proc/*/cmdline`. The Termux-side script passes its body to `bash -lc`, so that
+pattern was *in its own command line*: the check matched itself, answered
+"already running", and never started anything. The boot log looked perfect
+(`opencode up on attempt 1`) while nothing was listening. If you ever go back to
+matching processes, match the full path `/opencode/bin/opencode serve --service`
+and remember that any literal you write into a `bash -lc` body will appear in
+that process's argv.
 
 ### Logs and off switches
 
@@ -600,6 +609,7 @@ real boot path; do not rely on Termux:Boot.
 | `EACCES: permission denied, posix_spawn '/usr/bin/bash'` | container `/dev/null` is a device node on the `nodev` `/data` mount | `su -c 'sh /data/adb/dev-repair.sh'`, then retry |
 | `/proc` empty, `getprop` fine but `ps`/`ls /proc` empty | container was relaunched | `phone-up` remounts proc/sys |
 | OpenCode gone after reboot | nothing starts the proot container; the Magisk hook does | check `/data/adb/opencode-boot.log`, then `touch`-remove the disable marker |
+| boot log says "already running" but nothing listens | liveness matched a shell whose argv contains the pattern | check the socket, not argv: `:C0DE` in `/proc/net/tcp` |
 | `pgrep -f 'opencode'` returns a pid that is not the server | `pgrep -f` matches its own command line; the CLI shares the name | match argv `*/opencode serve --service` over `/proc/*/cmdline` |
 | autofill sheet seems untouchable | usually the SELinux block above | prove injection on a plain widget first; `KEYCODE_BACK` / DPAD fallback |
 | button ignores tap | stale coordinates after keyboard shift, or focus needed | re-screenshot, then DPAD + `KEYCODE_DPAD_CENTER` |

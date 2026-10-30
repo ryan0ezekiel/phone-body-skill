@@ -30,11 +30,11 @@ storage_ready() {
 }
 
 alive() {
-    for d in /proc/[0-9]*; do
-        c=$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null)
-        case "$c" in *"/opencode serve --service"*) return 0;; esac
-    done
-    return 1
+    # Liveness = the listening socket, not the process name. 49374 is 0xC0DE in
+    # /proc/net/tcp. An argv scan is wrong here: the Termux-side script carries
+    # the pattern in its own command line, so it matches itself and the hook
+    # concludes the server is up when it is not.
+    grep -qE ':C0DE [0-9A-F]{8}:0000 0A' /proc/net/tcp 2>/dev/null
 }
 
 trigger() {
