@@ -137,6 +137,42 @@ Two traps when regenerating the wrappers:
 `/sdcard` resolves correctly for reads and writes as root. Prefer
 `/proc/1/root/...` when a path must be unambiguous.
 
+## The container's /dev, and the spawn trap
+
+The container rootfs lives on `/data`, which Android mounts `nodev`. A device
+node created there is created fine and then **cannot be opened**: `open()`
+returns `EACCES`. Any spawn that redirects stdio to `/dev/null` then fails, and
+Bun reports it as:
+
+```
+PermissionDenied: ChildProcess.spawn (/usr/bin/bash -c echo ok)
+```
+
+That kills the `shell` tool itself, plus `grep`, `glob`, `/api/shell`,
+`/api/pty`, and every `git add`. `read`/`write`/`edit` keep working, which makes
+it look like a tool bug rather than a `/dev` bug.
+
+Never `mknod` in the container's `/dev`. Use the repair script, which
+bind-mounts Android's real nodes (devtmpfs / devpts, neither is `nodev`) over
+the container's placeholders:
+
+```bash
+sh /data/adb/dev-repair.sh           # as root, outside proot
+su -c 'sh /data/adb/dev-repair.sh'   # from Termux
+```
+
+It binds `null zero full random urandom tty ptmx` and `/dev/pts`, skips
+anything already mounted, leaves a plain empty file if a bind fails (openable,
+so nothing breaks), and logs to `/data/adb/dev-repair.log`. It is idempotent.
+
+Do the mounts from the **Android side** (Magisk hook, or `su -c` from Termux),
+never from inside the container. `mount` inside proot goes through path
+translation: `mount --bind /proc/1/root/dev/pts /dev/pts` actually bound the
+container's empty `pts` over Android's `/dev/pts`.
+
+If `/proc` inside the container is empty - it happens whenever the container is
+relaunched - `phone-up` remounts it (`mount -t proc proc /proc`).
+
 ## Hardware inventory (verified)
 
 | Part | Reality |
@@ -463,6 +499,70 @@ Config: `.../jellyfin/config/`
 
 The API needs a key for anything beyond `/System/Info/public`. Ask the user.
 
+## Boot behaviour (what comes up on its own)
+
+Two Magisk hooks in `/data/adb/service.d/` do all the work. **Both wait for the
+first unlock after a reboot** (up to 6 h), because Termux's data - and therefore
+the proot container's rootfs - lives in credential-encrypted storage and cannot
+be read before that. So the honest promise is "comes up by itself once you
+unlock the phone", not "comes up while still locked".
+
+### Jellyfin - yes
+
+`99-jellyfin-boot.sh`: wait `sys.boot_completed` (max 4 min) -> wait for CE
+storage -> launch the Termux activity -> `profile.d/start-services.sh` starts
+runit -> `jellyfin` service -> verify with `pgrep`, retry up to 6x -> Doze
+whitelist Termux -> start the guard.
+
+### OpenCode - yes
+
+`98-opencode-boot.sh`: same two waits -> repair the container's `/dev`
+(`/data/adb/dev-repair.sh`) -> ask Termux to run `~/.opencode-boot.sh` through
+RUN_COMMAND -> `proot-distro login debian` -> `opencode service start`. Retries
+4x; from attempt 2 it also launches the Termux activity, because the
+service-only cold start does not always wake the app. Listens on
+`127.0.0.1:49374`. The Termux side repeats the `/dev` repair through `su`,
+because the mount has to exist before the server spawns anything.
+
+Why RUN_COMMAND rather than starting proot from the hook directly: a
+root-spawned process lives in init's mount namespace and cannot see Termux's
+app data, where the container's rootfs is. Termux's `RunCommandService` runs the
+script with Termux's own mounts and uid, which is what `proot-distro` needs.
+
+OpenCode has no init here - no systemd, no cron - and `service.json` holds only
+a password, no autostart flag. This hook is the only thing that starts it.
+
+### The guard
+
+`/data/adb/jellyfin-guard.sh`, every 30 s:
+
+1. re-asserts the `jellyfin` kernel wakelock
+2. sets `oom_score_adj=-1000` on jellyfin, sshd, tmdbproxy, runsvdir **and the
+   OpenCode server**
+3. keeps the battery between 75% and 80% while plugged in
+4. restarts OpenCode if it disappears (180 s cooldown)
+
+OpenCode is identified by argv (`*/opencode serve --service`), **not** by process
+name - the interactive CLI is also called `opencode`, and `pgrep -f` matches its
+own command line.
+
+### Logs and off switches
+
+```bash
+tail -20 /data/adb/jellyfin-boot.log
+tail -20 /data/adb/opencode-boot.log
+tail -20 /data/adb/jellyfin-guard.log
+tail -20 /proc/1/root/data/data/com.termux/files/home/.opencode-boot.log
+
+touch /data/adb/opencode-autostart.disabled   # stop auto-start AND the restart
+touch /data/adb/battery-guard.disabled        # allow charging to 100%
+```
+
+The Termux:Boot hook (`~/.termux/boot/start-services`) has **never fired** on
+this device - no `boot.log` exists. Termux:Boot is installed but its receiver
+only registers after the app is launched once. The Magisk hooks above are the
+real boot path; do not rely on Termux:Boot.
+
 ## Network
 
 - `wlan0` up, `<lan-ip>/24`, RSSI -39, 2.4 GHz ch 6
@@ -497,6 +597,10 @@ The API needs a key for anything beyond `/System/Info/public`. Ask the user.
 | `termux-*: No such file or directory` | wrapper points at the container stub | run `phone-up` |
 | `input tap` does nothing, keys still work | SELinux Enforcing blocks injection | should not happen now; check `getenforce`, then `setenforce 0` |
 | `uiautomator dump` exits 0, no file | ART/`app_process` cannot run under proot | use `uidump` (runs it via Termux) |
+| `EACCES: permission denied, posix_spawn '/usr/bin/bash'` | container `/dev/null` is a device node on the `nodev` `/data` mount | `su -c 'sh /data/adb/dev-repair.sh'`, then retry |
+| `/proc` empty, `getprop` fine but `ps`/`ls /proc` empty | container was relaunched | `phone-up` remounts proc/sys |
+| OpenCode gone after reboot | nothing starts the proot container; the Magisk hook does | check `/data/adb/opencode-boot.log`, then `touch`-remove the disable marker |
+| `pgrep -f 'opencode'` returns a pid that is not the server | `pgrep -f` matches its own command line; the CLI shares the name | match argv `*/opencode serve --service` over `/proc/*/cmdline` |
 | autofill sheet seems untouchable | usually the SELinux block above | prove injection on a plain widget first; `KEYCODE_BACK` / DPAD fallback |
 | button ignores tap | stale coordinates after keyboard shift, or focus needed | re-screenshot, then DPAD + `KEYCODE_DPAD_CENTER` |
 | `INSTALL_FAILED_MISSING_SPLIT` | base APK without config splits | install the XAPK's APKs in one session |

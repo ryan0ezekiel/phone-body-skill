@@ -31,6 +31,9 @@ agent does not spend a session rediscovering it.
 | `scripts/phone-up.sh` | Rebuilds the proot→Android bridge (`/proc/1/root` + `/usr/local/bin` wrappers) |
 | `scripts/uidump.sh` | Dumps the Android view hierarchy (text + exact bounds) via Termux RUN_COMMAND |
 | `scripts/uitap.sh` | Taps the best-matching view by text/content-desc |
+| `scripts/dev-repair.sh` | Bind-mounts Android's real `/dev` nodes over the container's (nodev) placeholders |
+| `scripts/opencode-boot.sh` | Magisk `service.d` hook: starts the OpenCode server at boot |
+| `scripts/opencode-boot-termux.sh` | Termux side of that hook: `proot-distro login` → `opencode service start` |
 
 ## Install
 
@@ -47,6 +50,24 @@ Then install the helper scripts onto `PATH`:
 install -m 755 scripts/phone-up.sh /usr/local/bin/phone-up
 install -m 755 scripts/uidump.sh  /usr/local/bin/uidump
 install -m 755 scripts/uitap.sh   /usr/local/bin/uitap
+install -m 755 scripts/dev-repair.sh /data/adb/dev-repair.sh
+```
+
+`dev-repair.sh` is the `/dev` fix: the proot rootfs sits on Android's `nodev`
+`/data`, so device nodes created there cannot be opened, and every spawn that
+needs `/dev/null` dies with `EACCES` - including OpenCode's own shell tool. The
+script bind-mounts Android's real nodes over the container's placeholders. Run
+it as root, outside proot: `su -c 'sh /data/adb/dev-repair.sh'`.
+
+Boot-time auto-start (optional, needs Magisk + Termux with
+`allow-external-apps = true`):
+
+```bash
+cp scripts/opencode-boot-termux.sh /data/data/com.termux/files/home/.opencode-boot.sh
+chown 10086:10086 /data/data/com.termux/files/home/.opencode-boot.sh
+chmod 700 /data/data/com.termux/files/home/.opencode-boot.sh
+cp scripts/opencode-boot.sh /data/adb/service.d/98-opencode-boot.sh
+chmod 755 /data/adb/service.d/98-opencode-boot.sh
 ```
 
 ## The bridge in one paragraph
