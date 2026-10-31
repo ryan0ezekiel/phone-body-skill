@@ -393,7 +393,7 @@ password at all.
 reorders itself once a username is typed (the matching account moves to the
 top), so "tap the third row" silently picks a different account. That is what
 caused an "Incorrect password" in an earlier run - the password was fine, the
-wrong entry had been filled. Use `uitap "<account>"`, not a coordinate.
+wrong entry had been filled. Use `uitap "__jeom__"`, not a coordinate.
 
 #### Installing apps
 
@@ -496,7 +496,19 @@ null), so internal wins and the SD's `emulated:179,2;0` is left UNMOUNTED.
 the SD's UUID **before zygote/system_server starts**, so the framework reads a
 correct primary. It is idempotent, snapshots the pre-boot file to
 `/data/adb/storage-prefs.xml`, and logs to `/data/adb/primary-storage.log`.
-Disable with `touch /data/adb/primary-storage.disabled`.
+`/data/adb/service.d/97-primary-storage-late.sh` runs the same hook again at
+`late_start` (~7 s before `system_server`) and copies the exact bytes the
+framework is about to read to `/data/adb/storage-at-service.xml`.
+Disable both with `touch /data/adb/primary-storage.disabled`.
+
+**Content is not enough - the file must be readable by uid 1000.** On the
+2026-10-31 boot the attribute was present but the file was not readable by
+`system_server`, so `AtomicFile.openRead()` threw `FileNotFoundException`, the
+primary stayed null, and the framework rewrote `storage.xml` without the
+attribute 10 s later. There is no log line for this failure. The hook therefore
+enforces `chown 1000:1000`, `chmod 600` and
+`chcon u:object_r:system_data_file:s0` on **every** run, including the
+"already correct" path, and logs the resulting metadata.
 
 Verify after a boot:
 
@@ -512,6 +524,13 @@ framework rewrites `storage.xml` from memory on volume events, and the
 pre-boot state has been observed to come back without the attribute. The
 post-fs-data hook is what makes it deterministic.
 
+Note that `sm`/`cmd mount` have **no** shell command implementation on this
+ROM, and `setPrimaryStorageUuid` (binder code 58) triggers a real
+`vold.moveStorage` data copy - do not call it on a card that holds 77 GB of
+user data. The framework only reads `storage.xml` in its constructor, so the
+only safe way to apply a change is a framework restart (`killall
+system_server`) or a reboot.
+
 ## Services (runit, on the Termux side)
 
 ```bash
@@ -522,7 +541,7 @@ sv down jellyfin ; sv up jellyfin
 
 | Service | State | Notes |
 |---|---|---|
-| `jellyfin` | run | v12.2.0, name **<server-name>**, `http://127.0.0.1:8096` |
+| `jellyfin` | run | v12.2.0, name **musket**, `http://127.0.0.1:8096` |
 | `sshd` | run | Termux sshd |
 | `tmdbproxy` | run | metadata proxy for Jellyfin |
 | `ssh-agent` | down | start with `sv up ssh-agent` |
@@ -640,8 +659,8 @@ on Termux:Boot itself.
 
 ## Network
 
-- `wlan0` up, `<lan-ip>/24`, RSSI -39, 2.4 GHz ch 6
-- `tun1` up, `<tailscale-ip>/32` (Tailscale)
+- `wlan0` up, `10.231.241.45/24`, RSSI -39, 2.4 GHz ch 6
+- `tun1` up, `100.86.57.18/32` (Tailscale)
 - `rmnet_data*` present but no SIM inserted (`gsm.sim.state=ABSENT,ABSENT`)
 - IPv4 forced for apt via `/etc/apt/apt.conf.d/99nodrop`
 

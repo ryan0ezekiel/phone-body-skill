@@ -34,7 +34,8 @@ agent does not spend a session rediscovering it.
 | `scripts/dev-repair.sh` | Bind-mounts Android's real `/dev` nodes over the container's (nodev) placeholders |
 | `scripts/oc-binds.sh` | Idempotently binds `/proc`, `/sys`, `/data`, `/system`, `/storage` into the container rootfs |
 | `scripts/opencode-chroot.sh` | Enters the container as real root (non-destructive binds); used by the `opencode` command and by boot |
-| `scripts/primary-storage.sh` | Magisk `post-fs-data.d` hook: records the adopted SD as primary before system_server reads `storage.xml` |
+| `scripts/primary-storage.sh` | Magisk `post-fs-data.d` hook: records the adopted SD as primary (and fixes owner/label) before system_server reads `storage.xml` |
+| `scripts/primary-storage-late.sh` | Magisk `service.d` hook: re-applies the same fix at `late_start` and snapshots the bytes system_server is about to read |
 | `scripts/start-services.sh` | Termux-side script that starts runit (`sshd`, `jellyfin`, `tmdbproxy`) |
 | `scripts/opencode-boot.sh` | Magisk `service.d` hook: starts the OpenCode server at boot via RUN_COMMAND |
 | `scripts/opencode-boot-termux.sh` | Termux side: dev-repair + oc-binds + runit + `opencode-chroot` → `opencode serve` |
@@ -94,7 +95,13 @@ your card's UUID in it:
 ```bash
 cp scripts/primary-storage.sh /data/adb/post-fs-data.d/00-primary-storage.sh
 chmod 755 /data/adb/post-fs-data.d/00-primary-storage.sh
+cp scripts/primary-storage-late.sh /data/adb/service.d/97-primary-storage-late.sh
+chmod 755 /data/adb/service.d/97-primary-storage-late.sh
 ```
+
+The hook enforces `1000:1000`, `600` and `system_data_file` on every run, not
+just the content: an unreadable `storage.xml` makes `system_server` silently
+fall back to a null primary and rewrite the file without the attribute.
 
 
 ## The bridge in one paragraph

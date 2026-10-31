@@ -7,11 +7,16 @@
 # primaryStorageUuid attribute. Version 3 makes that attribute "valid" even
 # when absent, so readSettingsLocked() assigns
 #     mPrimaryStorageUuid = readStringAttribute(...) = null
-# A null primary compares equal to the internal volume, whose fsUuid is also
-# null, so the framework marks internal storage primary and never mounts the
-# adopted SD's emulated volume. /storage/emulated/0 then points at the empty
-# /data/media/0 while the real files sit in
+# A null primary never matches the adopted SD's emulated volume, so the
+# framework mounts the internal emulated volume as primary instead. /storage/
+# emulated/0 then points at the empty /data/media/0 while the real files sit in
 # /mnt/expand/<uuid>/media/0. Writing the attribute here makes the SD primary.
+#
+# IMPORTANT: ownership/mode/SELinux label are enforced on EVERY run, including
+# the "already correct" path. If the file is not readable by uid 1000 (system)
+# the framework silently falls back to FileNotFoundException -> null primary,
+# and then rewrites the file without the attribute. That is exactly what
+# happened on the 2026-10-31 boot: content was right, metadata was not.
 #
 # Idempotent. Disable with: touch /data/adb/primary-storage.disabled
 
@@ -32,8 +37,7 @@ if [ ! -f "$F" ]; then
     printf '<?xml version="1.0" encoding="utf-8" standalone="yes" ?>\n<volumes version="3" primaryStorageUuid="%s">\n</volumes>\n' "$UUID" > "$F"
     log "created $F with primary=$UUID"
 elif grep -q "primaryStorageUuid=\"$UUID\"" "$F"; then
-    log "already primary=$UUID"
-    exit 0
+    log "content already primary=$UUID"
 elif grep -q '<volumes' "$F"; then
     sed 's|<volumes[^>]*>|<volumes version="3" primaryStorageUuid="'"$UUID"'">|' "$F" > "$TMP" 2>/dev/null
     if [ -s "$TMP" ]; then
@@ -49,8 +53,11 @@ else
     log "replaced malformed $F with primary=$UUID"
 fi
 
+# Always enforce metadata, even when the content needed no change. The
+# framework runs as uid 1000 and must be able to open() this file.
 chown 1000:1000 "$F" 2>/dev/null
 chmod 600 "$F" 2>/dev/null
 chcon u:object_r:system_data_file:s0 "$F" 2>/dev/null
+log "meta $(stat -c '%u:%g %a %s bytes' "$F" 2>/dev/null) label=$(ls -Zd "$F" 2>/dev/null | awk '{print $1}')"
 
 exit 0
