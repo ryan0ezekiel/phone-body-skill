@@ -9,6 +9,12 @@
 
 [ -e /data/adb/primary-storage.disabled ] && exit 0
 
+# Diagnostic: on 2026-10-31 storage.xml existed at post-fs-data but was gone by
+# late_start. Record what is on disk right before we re-apply, so the next boot
+# shows whether something is still removing it.
+LOG=/data/adb/primary-storage.log
+echo "$(date '+%Y-%m-%d %H:%M:%S') late-pre: $(ls -l /data/system/ 2>/dev/null | grep -i storage | tr '\n' ';')" >> "$LOG"
+
 sh /data/adb/post-fs-data.d/00-primary-storage.sh
 cp -f /data/system/storage.xml /data/adb/storage-at-service.xml 2>/dev/null
 
