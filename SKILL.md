@@ -616,6 +616,47 @@ the old "unmount then rebind" version let a second run (an interactive
 OpenCode has no init here - no systemd, no cron - and `service.json` holds only
 a password, no autostart flag. This hook is the only thing that starts it.
 
+### Kimaki (Discord bridge) - yes
+
+Kimaki turns Discord into the control surface for this OpenCode server: each
+Discord **channel is a project directory**, each **thread is a session**. It is
+a separate Node process, not an OpenCode feature - it drives the same
+`127.0.0.1:49374` service the TUI uses.
+
+- Installed globally inside the container: `npm i -g kimaki@latest`
+  -> `/usr/local/node22/lib/node_modules/kimaki`, binary `/usr/local/bin/kimaki`.
+- **Needs Node 22**, not 20. Debian's `nodejs` package is 20.19 and several
+  Kimaki dependencies (`undici@8`, `werift`, `@discordjs/voice`) declare
+  `node >= 22`; on Node 20 they warn at install and can fail at runtime. Node 22
+  comes from the official tarball into `/usr/local/node22`, symlinked into
+  `/usr/local/bin` (Debian's `/usr/bin/node` is left alone).
+- Data dir `/root/.kimaki` (mode 700): `kimaki.db` holds the bot credentials
+  (mode 600), `kimaki.log` the log. No token is stored in any script.
+- Single-instance lock port **29988** (`0x7524`), so a second copy can be run
+  with `KIMAKI_LOCK_PORT=... kimaki --data-dir ...`.
+- It writes its own OpenCode plugin shims into
+  `~/.config/opencode/plugins/kimaki/` and `.../kimaki-anthropic/` on every
+  start; do not hand-edit them, they are regenerated.
+- Started by the same Termux boot script, right after OpenCode is listening
+  (step 3b): `setsid su -c 'opencode-chroot -- /usr/local/bin/kimaki'`, then a
+  40 s poll of `/proc/net/tcp` for `:7524`.
+- It reconnects to OpenCode by itself, so an OpenCode restart (the guard does
+  that) does not need a Kimaki restart. `kimaki status`, `kimaki project list`,
+  `kimaki logs`, `kimaki restart` are the useful CLI verbs.
+
+Projects are mapped one channel each:
+
+```bash
+kimaki project add /root/memory
+kimaki project add /root/repos/phone-body-skill
+kimaki project add /root
+```
+
+Self-hosted mode (your own Discord app) reads the token from
+`KIMAKI_BOT_TOKEN` on first start and then keeps it in `kimaki.db`; later
+starts need no environment at all. Gateway mode (`kimaki --gateway`) is the
+alternative: it uses the shared bot and needs a browser to authorize.
+
 ### The guard
 
 `/data/adb/jellyfin-guard.sh`, every 30 s:

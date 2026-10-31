@@ -94,6 +94,25 @@ else
     listening || log "opencode FAILED: not listening 30s after start"
 fi
 
+# --- 3b. Kimaki (Discord bridge) -------------------------------------------
+# Kimaki drives this same OpenCode service from Discord. Credentials live in
+# /root/.kimaki (self-hosted bot token, saved in kimaki.db), so no secret is
+# needed here. Liveness = its single-instance lock port 29988 (0x7524).
+kimaki_up() { grep -qE ':7524 [0-9A-F]{8}:0000 0A' /proc/net/tcp 2>/dev/null; }
+if kimaki_up; then
+    log "kimaki already listening on 29988"
+else
+    log "starting kimaki via opencode-chroot"
+    setsid su -c "$CHROOT -- /usr/local/bin/kimaki" >> "$LOG" 2>&1 < /dev/null &
+    i=0
+    while [ "$i" -lt 40 ]; do
+        kimaki_up && break
+        sleep 1
+        i=$((i + 1))
+    done
+    kimaki_up && log "kimaki OK: listening after ${i}s" || log "kimaki FAILED: not listening 40s after start"
+fi
+
 # --- 4. wait for sshd (informational; runit retries on its own) ------------
 i=0
 while [ "$i" -lt 30 ] && ! sshd_up; do
