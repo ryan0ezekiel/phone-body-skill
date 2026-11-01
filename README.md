@@ -28,19 +28,18 @@ agent does not spend a session rediscovering it.
 | File | Purpose |
 |---|---|
 | `SKILL.md` | The skill itself: hardware inventory, capability cookbook, failure table |
-| `scripts/phone-up.sh` | Rebuilds the proot→Android bridge (`/proc/1/root` + `/usr/local/bin` wrappers) |
 | `scripts/uidump.sh` | Dumps the Android view hierarchy (text + exact bounds) via Termux RUN_COMMAND |
 | `scripts/uitap.sh` | Taps the best-matching view by text/content-desc |
-| `scripts/dev-repair.sh` | Bind-mounts Android's real `/dev` nodes over the container's (nodev) placeholders |
-| `scripts/oc-binds.sh` | Idempotently binds `/proc`, `/sys`, `/data`, `/system`, `/storage` into the container rootfs |
-| `scripts/opencode-chroot.sh` | Enters the container as real root (non-destructive binds); used by the `opencode` command and by boot |
+| `scripts/opencode-chroot.sh` | Enters the container as real root with non-destructive binds; used by `opencode` and `debian` |
 | `scripts/primary-storage.sh` | Magisk `post-fs-data.d` hook: records the adopted SD as primary (and fixes owner/label) before system_server reads `storage.xml` |
 | `scripts/primary-storage-late.sh` | Magisk `service.d` hook: re-applies the same fix at `late_start` and snapshots the bytes system_server is about to read |
-| `scripts/start-services.sh` | Termux-side script that starts runit (`sshd`, `jellyfin`, `tmdbproxy`) |
-| `scripts/opencode-boot.sh` | Magisk `service.d` hook: starts the OpenCode server at boot via RUN_COMMAND |
-| `scripts/opencode-boot-termux.sh` | Termux side: dev-repair + oc-binds + runit + `opencode-chroot` → `opencode serve` |
-| `scripts/jellyfin-boot.sh` | Magisk `service.d` hook: starts runit at boot via RUN_COMMAND, then the guard |
+| `scripts/start-services.sh` | Termux:Boot script: wake lock, then `service-daemon`/runsvdir |
+| `scripts/jellyfin-boot.sh` | Magisk `service.d` 99: waits for boot + storage, RUN_COMMAND -> `start-services`, then the guard |
 | `scripts/jellyfin-guard.sh` | Watchdog: wakelock, OOM shielding, battery ceiling, restarts OpenCode/runit |
+| `scripts/kmsg-capture.py` | Follows `/dev/kmsg` with fsync, for reboot forensics |
+| `scripts/kmsg-capture-hook.sh` | Magisk `service.d` 96: starts the capture with `setsid` |
+| `scripts/opencode-service.sh` | runit service: `opencode serve --service` singleton, stands by if one is live |
+| `scripts/kimaki-start.sh` | runit service: waits for a live OpenCode service, then runs the global `kimaki` |
 
 ## Install
 
@@ -54,38 +53,49 @@ cp -r phone-body ~/.config/opencode/skills/
 Then install the helper scripts onto `PATH`:
 
 ```bash
-install -m 755 scripts/phone-up.sh /usr/local/bin/phone-up
 install -m 755 scripts/uidump.sh  /usr/local/bin/uidump
 install -m 755 scripts/uitap.sh   /usr/local/bin/uitap
-install -m 755 scripts/dev-repair.sh /data/adb/dev-repair.sh
-install -m 755 scripts/oc-binds.sh   /data/adb/oc-binds.sh
+install -m 755 scripts/opencode-chroot.sh "$PREFIX/bin/opencode-chroot"
 ```
 
-`dev-repair.sh` is the `/dev` fix: the proot rootfs sits on Android's `nodev`
-`/data`, so device nodes created there cannot be opened, and every spawn that
-needs `/dev/null` dies with `EACCES` - including OpenCode's own shell tool. The
-script bind-mounts Android's real nodes over the container's placeholders. Run
-it as root, outside proot: `su -c 'sh /data/adb/dev-repair.sh'`.
+There is no proot bridge to build any more. `opencode-chroot` mounts the phone
+into the rootfs (`/proc`, `/sys`, `/dev`, `/dev/pts`, `/system`, `/system_ext`,
+`/product`, `/odm`, `/vendor`, `/linkerconfig`, `/data`,
+`/storage/emulated/0` and four apexes) and then calls `chroot(2)`. The mounts are
+idempotent: a bind that already exists is skipped, never unmounted, because
+every `su` shares one mount namespace and a rebind would pull `/data` out from
+under a running server.
 
-`oc-binds.sh` is the same idea for the rest of the phone (`/proc`, `/sys`,
-`/data`, `/system`, `/storage/emulated/0`). It only ever adds mounts, never
-removes them: every `su` shares one mount namespace, so a second run must not
-tear the background server's `/data` away.
+Because `/system` is genuinely mounted, `am`, `pm`, `dumpsys`, `input` and the
+rest are the real binaries. No `/proc/1/root` wrappers, no `phone-up`, no
+`dev-repair.sh`, no `oc-binds.sh` - those were proot workarounds that shadowed
+the real tools and are deleted on purpose.
 
-Boot-time auto-start (optional, needs Magisk + Termux with
-`allow-external-apps = true`):
+Boot-time auto-start (needs Magisk + Termux with
+`allow-external-apps = true`). One chain, one supervisor:
 
 ```bash
-cp scripts/opencode-boot-termux.sh /data/data/com.termux/files/home/.opencode-boot.sh
-chown 10086:10086 /data/data/com.termux/files/home/.opencode-boot.sh
-chmod 700 /data/data/com.termux/files/home/.opencode-boot.sh
-cp scripts/opencode-boot.sh  /data/adb/service.d/98-opencode-boot.sh
-cp scripts/jellyfin-boot.sh  /data/adb/service.d/99-jellyfin-boot.sh
-cp scripts/jellyfin-guard.sh /data/adb/jellyfin-guard.sh
-chmod 755 /data/adb/service.d/9*.sh /data/adb/jellyfin-guard.sh
-cp scripts/start-services.sh /data/data/com.termux/files/home/.termux/boot/start-services
+install -m 755 scripts/jellyfin-boot.sh    /data/adb/service.d/99-jellyfin-boot.sh
+install -m 755 scripts/jellyfin-guard.sh   /data/adb/jellyfin-guard.sh
+install -m 755 scripts/kmsg-capture.py     /data/adb/kmsg-capture.sh   # py, .sh name
+install -m 755 scripts/kmsg-capture-hook.sh /data/adb/service.d/96-kmsg-capture.sh
+install -m 700 scripts/start-services.sh   /data/data/com.termux/files/home/.termux/boot/start-services
 chown 10086:10086 /data/data/com.termux/files/home/.termux/boot/start-services
+
+# inside the container, as runit service scripts
+install -m 755 scripts/opencode-service.sh /root/bin/opencode-service.sh
+install -m 755 scripts/kimaki-start.sh     /root/bin/kimaki-start.sh
 ```
+
+The Magisk hook waits for `sys.boot_completed` and CE storage, then sends
+Termux a **RUN_COMMAND** intent to run `start-services`; that script starts
+`service-daemon`/runsvdir as uid 10086 and runit owns `sshd`, `jellyfin`,
+`tmdbproxy`, `opencode` and `kimaki` from then on. Never launch `TermuxActivity`
+from a hook: background activity starts are unreliable on this ROM.
+
+`opencode serve --service` is a singleton and writes
+`/root/.local/state/opencode/service.json`; that file is how the CLI, the TUI and
+Kimaki find the same server. Never pin a port, never start a second server.
 
 Adoptable storage: if the SD card is primary storage, the ROM may write
 `storage.xml` without `primaryStorageUuid`, which makes internal storage win and
@@ -106,10 +116,13 @@ fall back to a null primary and rewrite the file without the attribute.
 
 ## The bridge in one paragraph
 
-`phone-up` symlinks 34 Android binaries into `/usr/local/bin`, each a wrapper that
-`exec chroot /proc/1/root /system/bin/<tool> "$@"`. It also drops stale symlinks
-first, because `/proc/1/root` disappears when the container restarts and a broken
-link is worse than a missing one. Run it at the start of every batch.
+There is no bridge. The container is a real `chroot(2)` with the phone's
+`/proc`, `/sys`, `/dev`, `/system` and `/data` bind-mounted in, so Android's own
+binaries run unchanged and `/proc/1/comm` is `init` on both sides. `proot-distro
+login debian` produces a fake machine (empty `/proc`, stub `/system`,
+`/dev/null` a 0-byte file) and must never be used. If a command fails with
+`CANNOT LINK EXECUTABLE` or `gralloc-mapper is missing`, you are in the wrong
+door, not in a broken phone.
 
 ## UI automation
 

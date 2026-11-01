@@ -22,5 +22,5 @@ else
 fi
 
 sleep 8
-sv status sshd jellyfin >> "$LOG" 2>&1
+sv status sshd jellyfin tmdbproxy opencode kimaki >> "$LOG" 2>&1
 echo "[$(date -Iseconds)] hook finished" >> "$LOG"

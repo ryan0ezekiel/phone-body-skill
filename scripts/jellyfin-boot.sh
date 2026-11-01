@@ -2,14 +2,17 @@
 # /data/adb/service.d/99-jellyfin-boot.sh
 # Brings the Termux media server up at boot without anyone opening Termux.
 #
-# Why it launches Termux instead of starting Jellyfin directly:
-# a root-spawned process lives in root's mount namespace and cannot read
-# /storage/emulated/0. Launching the app keeps Jellyfin's normal storage view.
+# Why RUN_COMMAND instead of starting Jellyfin directly: the runit services
+# must run as the Termux uid (10086) to see Termux's data and its storage
+# view. RUN_COMMAND starts the app's service, runs one script, and shows no
+# window - unlike an activity start, which this ROM does not honour from the
+# background.
 #
-# Why it waits before launching:
-# with a PIN set, Termux lives in credential-encrypted storage. Until the first
-# unlock, its data is unreadable and the app cannot run at all. Waiting for that
-# unlock is what makes a late unlock still bring the server back on its own.
+# Why it waits before starting: with a PIN set, Termux lives in
+# credential-encrypted storage. Until the first unlock, its data is unreadable
+# and the app cannot run at all. Waiting for that unlock is what makes a late
+# unlock still bring the server back on its own. This device has no lock
+# credential, so the wait is zero.
 
 LOG=/data/adb/jellyfin-boot.log
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"; }

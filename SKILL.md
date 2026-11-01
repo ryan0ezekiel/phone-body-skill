@@ -7,13 +7,22 @@ description: How to operate this Android phone from inside the Debian container.
 
 ## This machine is a phone, and you are inside it
 
-You are root in a **Debian 13 (trixie) proot-distro container** on a **rooted
+You are `uid=0` in a **real `chroot(2)`** of Debian 13 (trixie) on a **rooted
 Realme 5 Pro** (`RMX1971`), Android 13 (SDK 33), aarch64, kernel
-`4.9.337-KharaMe5Pro`. Magisk is installed. SELinux is **permissive by design**
-on this device: a Magisk module `selinux_permissive` forces `setenforce 0` in
-`post-fs-data` (before zygote) and a watchdog re-asserts it every 30s if
-anything flips it back. Still read `getenforce` - but do not treat `Enforcing`
-as normal, it means the module did not load or was deliberately opted out.
+`4.9.337-KharaMe5Pro`. Same kernel as Android, shared `/proc`, not emulated. Not
+a VM, not proot.
+
+The rootfs is a folder inside Termux:
+
+    /data/data/com.termux/files/usr/var/lib/proot-distro/containers/debian/rootfs
+
+The word `proot-distro` in that path is only **where the files were downloaded**.
+
+Magisk is installed. SELinux is **permissive by design** on this device: a Magisk
+module `selinux_permissive` forces `setenforce 0` in `post-fs-data` (before
+zygote) and a watchdog re-asserts it every 30 s if anything flips it back. Still
+read `getenforce` - but do not treat `Enforcing` as normal, it means the module
+did not load or was deliberately opted out.
 
 To deliberately hand control back to SELinux:
 
@@ -30,148 +39,84 @@ events still work. That is the single most confusing failure on this device.
 Permissive fixes it; the trade-off is that SELinux is no longer containing
 anything, so any app exploit has more room. This is the owner's explicit call.
 
-It is **not** a chroot and **not** a VM. proot fakes the root with `ptrace`,
-which has four consequences you must internalise:
+## The only doors
 
-1. `/proc` and `/sys` are **not mounted** by default. Until you mount them you
-   are blind to the hardware. They also **drop between tool calls** - the
-   container is sometimes relaunched, so run `phone-up` at the start of every
-   batch, not once per session.
-2. `/system`, `/vendor`, `/apex`, `/data/data/com.termux/...` are **empty stubs**
-   inside the container. The real ones live under `/proc/1/root/`.
-3. `mount --bind` silently appears to succeed and does nothing. Do not rely on it.
-4. `chroot /proc/1/root` **does** work (proot emulates it) and is the reliable
-   way to run Android binaries. See the bridge section.
+| From Termux | Command | Gives |
+|---|---|---|
+| the agent | `opencode` | the TUI, inside the chroot |
+| a human shell | `debian` | interactive bash, same chroot, same binds |
+| release binds | `debian-unbind` | unmounts the 16 binds (only before wiping/repairing the rootfs) |
 
-The kernel, the network stack and the hardware are real. `/proc/1` is the real
-Android `init`. Everything below was verified on this device, not assumed.
+Both run `opencode-chroot`, which mounts the phone in and then calls
+`chroot(2)`:
+
+    opencode -> /usr/local/bin/opencode-run -> /root/.opencode/bin/opencode
+
+**Never run `proot-distro login debian`.** That door yields a fake machine:
+empty `/proc`, `/system` as empty stubs, `/dev/null` a 0-byte file, and
+`mount --bind` that reports success without mounting. If you see those symptoms
+you are in the wrong door - exit and use `opencode` or `debian`.
+
+Binds are idempotent and stay mounted (16 of them):
+
+    /proc /sys /dev /dev/pts
+    /apex/com.android.runtime /apex/com.android.art
+    /apex/com.android.i18n /apex/com.android.vndk.v33
+    /system /system_ext /product /odm /vendor /linkerconfig
+    /data /storage/emulated/0
 
 ## Step 0 - always run this first
 
-```bash
-phone-up
-```
-
-Idempotent. Mounts `/proc` and `/sys`, builds the Android binary bridge,
-points the Termux:API wrappers at the real install, prints a status line.
-
-```text
-model    : Realme 5 Pro
-android  : 13 (sdk 33)
-selinux  : Permissive
-battery  : 79% Discharging
-soc temp : 31.1C
-uptime   : 68m
-bridge   : 34 tools
-```
-
-If `phone-up` says `/sys is empty`, stop and report it - nothing hardware
-related will work.
-
-If the command is missing, reinstall it from this skill:
+There is no `phone-up` any more. Prove the door instead; all four lines must
+hold, and if any fails you are in the wrong door, not on a broken phone:
 
 ```bash
-cp /root/.config/opencode/skills/phone-body/scripts/phone-up.sh /usr/local/bin/phone-up
-chmod +x /usr/local/bin/phone-up
+ls /proc | wc -l          # 800+ entries
+ls -l /dev/null           # crw-rw-rw- 1,3  - a real device
+command -v am             # /system/bin/am
+cat /proc/1/comm          # init
 ```
 
-## The bridge - why Android binaries work
+## The bridge - none is needed
 
-An Android binary is ELF with `PT_INTERP=/system/bin/linker64`. Inside the
-container that path does not exist, so a direct exec fails with
-`cannot execute: required file not found`.
+`/system/bin` is on `PATH` and holds the real Android binaries, not wrappers:
 
-Symlinking `/proc/1/root/system/bin/am` into the container does **not** work
-reliably: the loader is looked up through the container's `/system` stub, which
-is empty (or worse, bind-mounted to garbage). `chroot` re-roots the process at
-the real Android tree, so the interpreter, `/apex` and the libraries all
-resolve:
+    am pm input svc dumpsys screencap screenrecord getprop settings
+    cmd wm media logcat uiautomator monkey locksettings dpm content
 
-```bash
-chroot /proc/1/root /system/bin/getprop ro.product.model   # Realme 5 Pro
-chroot /proc/1/root /system/bin/toybox id
-# uid=0(root) gid=0(root) context=u:r:magisk:s0
-```
+If `command -v am` answers anything other than `/system/bin/am`, something has
+replaced the body - report it, do not use it.
 
-`phone-up` writes one-line wrappers into `/usr/local/bin` (which precedes the
-Termux bin dir in `PATH`) so you can just type `pm`, `am`, `dumpsys`:
+Do **not** rebuild the proot workarounds. On 2026-10-31 these were deliberately
+deleted because they shadowed the real binaries: the ~30 `/proc/1/root` wrappers
+in `/usr/local/bin`, `phone-up`, `oc-binds.sh`, `dev-repair.sh`, and the proot
+boot hook. `/system` and `/dev` are genuinely mounted now.
 
-```sh
-#!/bin/sh
-exec chroot /proc/1/root /system/bin/pm "$@"
-```
+`su 10086` also needs the real root: `su 10086 -c '...'` works from inside the
+chroot (the binary is `/debug_ramdisk/su`, a symlink to `./magisk`), and
+`/usr/local/bin/tsu` wraps it for convenience.
 
-Never expose all 414 binaries: Android's `ps`, `df`, `date`, `grep`, `ls`
-would shadow the Debian ones and quietly break every script. `phone-up`
-installs a curated list only.
+## Path map - there is only reality
 
-Bridged: `am pm getprop setprop dumpsys input screencap screenrecord cmd
-settings content svc wm monkey service app_process dalvikvm logcat dpm ime
-media uiautomator locksettings device_config hid getenforce setenforce
-getevent sendevent dmesg toybox`
+| You want | Use this |
+|---|---|
+| Android binaries | `/system/bin/<tool>` (already on `PATH`) |
+| Shared storage | `/sdcard` = `/storage/emulated/0` (bound) |
+| Termux install | `/data/data/com.termux/files` (bound) |
+| Magisk | `/data/adb` (bound) |
+| App data | `/data/data/<pkg>` (bound) |
 
-Two traps when regenerating the wrappers:
+Paths under `/proc/1/root/...` also work, but they are unnecessary here and they
+are the signature of the old proot workaround. Use the real paths.
 
-- `>` follows a symlink. If `/usr/local/bin/pm` is still a symlink into
-  read-only `/system`, the write fails with `Read-only file system`. `rm -f`
-  the link first - `phone-up` does this.
-- Termux ships its own `pm` shim at `/data/data/com.termux/files/usr/bin/pm`.
-  If your wrappers land anywhere later in `PATH`, that shim wins and prints
-  nothing. Keep them in `/usr/local/bin` and verify with `command -v pm`.
+## The container's /dev
 
-`su 10086` also needs the real root: `chroot /proc/1/root /debug_ramdisk/su
-10086 -c '...'`. Note `/system/bin/su` does not exist; the binary is
-`/debug_ramdisk/su` (a symlink to `./magisk`).
-
-## Path map - container vs reality
-
-| You want | Use this | Not this |
-|---|---|---|
-| Android binaries | `/usr/local/bin/<tool>` (chroot wrapper) | `/system/bin/<tool>` |
-| Real `/system` | `/proc/1/root/system` | `/system` (stub) |
-| Shared storage | `/sdcard` or `/proc/1/root/storage/emulated/0` | `/storage/emulated/0` (stub) |
-| Termux install | `/proc/1/root/data/data/com.termux/files` | `/data/data/com.termux/files` (stub) |
-| Magisk | `/proc/1/root/data/adb` | - |
-| App data | `/proc/1/root/data/data/<pkg>` | - |
-
-`/sdcard` resolves correctly for reads and writes as root. Prefer
-`/proc/1/root/...` when a path must be unambiguous.
-
-## The container's /dev, and the spawn trap
-
-The container rootfs lives on `/data`, which Android mounts `nodev`. A device
-node created there is created fine and then **cannot be opened**: `open()`
-returns `EACCES`. Any spawn that redirects stdio to `/dev/null` then fails, and
-Bun reports it as:
-
-```
-PermissionDenied: ChildProcess.spawn (/usr/bin/bash -c echo ok)
-```
-
-That kills the `shell` tool itself, plus `grep`, `glob`, `/api/shell`,
-`/api/pty`, and every `git add`. `read`/`write`/`edit` keep working, which makes
-it look like a tool bug rather than a `/dev` bug.
-
-Never `mknod` in the container's `/dev`. Use the repair script, which
-bind-mounts Android's real nodes (devtmpfs / devpts, neither is `nodev`) over
-the container's placeholders:
-
-```bash
-sh /data/adb/dev-repair.sh           # as root, outside proot
-su -c 'sh /data/adb/dev-repair.sh'   # from Termux
-```
-
-It binds `null zero full random urandom tty ptmx` and `/dev/pts`, skips
-anything already mounted, leaves a plain empty file if a bind fails (openable,
-so nothing breaks), and logs to `/data/adb/dev-repair.log`. It is idempotent.
-
-Do the mounts from the **Android side** (Magisk hook, or `su -c` from Termux),
-never from inside the container. `mount` inside proot goes through path
-translation: `mount --bind /proc/1/root/dev/pts /dev/pts` actually bound the
-container's empty `pts` over Android's `/dev/pts`.
-
-If `/proc` inside the container is empty - it happens whenever the container is
-relaunched - `phone-up` remounts it (`mount -t proc proc /proc`).
+`/dev` is bound from Android (devtmpfs + devpts), so `/dev/null`, `/dev/zero`,
+`/dev/random`, `/dev/tty`, `/dev/ptmx` and `/dev/pts` are real devices and any
+spawn behaves normally. If a spawn ever fails with
+`PermissionDenied: ChildProcess.spawn` or `EACCES` on `/dev/null`, the bind is
+missing: `debian-unbind` and re-enter with `opencode`/`debian`. Never `mknod`
+inside the rootfs.
 
 ## Hardware inventory (verified)
 
@@ -193,7 +138,7 @@ relaunched - `phone-up` remounts it (`mount -t proc proc /proc`).
 
 ## Capability cookbook
 
-All commands assume `phone-up` has run.
+All commands run inside the chroot door; `/system/bin` is on `PATH`.
 
 ### State / telemetry (read-only, safe, fast)
 
@@ -341,7 +286,7 @@ uitap -f "Log in"   # find only, prints "x y label"
 `uitap` prefers an exact match over a substring and a clickable node over a
 label, so `uitap "Allow"` hits the button rather than the dialog title.
 
-Both work by running `uiautomator` **outside proot**, through Termux's
+Both work by running `uiautomator` **outside the chroot**, through Termux's
 RUN_COMMAND service, because ART cannot run inside the container:
 
 - `app_process` starts, logs `RuntimeInit uid 0`, then exits silently with
@@ -449,19 +394,25 @@ A 126 MB app installs in about 90s on this link (~1.5 MB/s through Play).
 `termux-*` must run as **uid 10086**, never as root - as root they hang forever
 with no error.
 
-Status: **Termux:API is currently unreliable from inside the container.** The
-old wrappers used `setpriv --reuid=10086`, which cannot exec the Termux binaries
-because they live in the real Android root, not the container stub. Rewriting
-them to go through `chroot /proc/1/root /debug_ramdisk/su 10086 -c '...'` gets
-the uid right but the commands then hang (the Termux app-side service does not
-answer that invocation). Treat `termux-battery-status`, `termux-torch` etc. as
-**broken until re-tested**; prefer the Android CLI (`dumpsys`, `cmd`, `svc`,
-`settings`) which works.
+84 wrappers exist and run as uid 10086 via `setpriv`. They are only as alive as
+`com.termux.api`, which is installed on **adoptable storage** (`private:179,2`).
+When that volume drops, the package becomes unavailable, broadcasts reach
+nobody, and **every `termux-*` call hangs with no error and no output**.
 
-- 84 wrappers exist in `/usr/local/bin`.
-- Binaries live at `/proc/1/root/data/data/com.termux/files/usr/bin`.
-- `$TMPDIR` = `/data/data/com.termux/files/usr/tmp`, writable by that uid.
-- `/system/bin/su` does not exist; use `/debug_ramdisk/su`.
+Always diagnose before waiting, and always wrap in `timeout`:
+
+```bash
+pidof com.termux.api      # empty = dead, kill the call and use the Android CLI
+timeout 20 termux-battery-status
+```
+
+Prefer the Android CLI (`dumpsys`, `cmd`, `svc`, `settings`) when you only need
+state; it never depends on that package.
+
+- Wrappers live in `/usr/local/bin` (they precede Termux's bin dir in `PATH`).
+- Binaries live at `/data/data/com.termux/files/usr/bin`.
+- `$TMPDIR` = `/data/data/com.termux/files/usr/tmp`, writable by uid 10086.
+- `/system/bin/su` does not exist; use `/debug_ramdisk/su` (or `tsu`).
 
 ## Files and storage
 
@@ -534,17 +485,25 @@ system_server`) or a reboot.
 ## Services (runit, on the Termux side)
 
 ```bash
-sv status jellyfin sshd ssh-agent tmdbproxy
+SVDIR=/data/data/com.termux/files/usr/var/service
+sv status sshd jellyfin tmdbproxy opencode kimaki
 sv restart jellyfin
 sv down jellyfin ; sv up jellyfin
 ```
 
-| Service | State | Notes |
+| Service | Port | Notes |
 |---|---|---|
-| `jellyfin` | run | v12.2.0, name **musket**, `http://127.0.0.1:8096` |
-| `sshd` | run | Termux sshd |
-| `tmdbproxy` | run | metadata proxy for Jellyfin |
-| `ssh-agent` | down | start with `sv up ssh-agent` |
+| `sshd` | 8022 | Termux sshd |
+| `jellyfin` | 8096 | v12.2.0, name **musket** |
+| `tmdbproxy` | - | metadata proxy for Jellyfin |
+| `opencode` | 49374 | `/root/bin/opencode-service.sh`, `serve --service` singleton |
+| `kimaki` | lock 29988 | `/root/bin/kimaki-start.sh`, Discord bridge |
+| `ssh-agent` | - | down by design, start with `sv up ssh-agent` |
+
+Whether a unit is up is live state: `sv status <name>`, never a table. `sv
+status` reports the pid of the `su` wrapper, not the chrooted daemon, so for
+`opencode` read `/root/.local/state/opencode/service.json` and for `kimaki` run
+`kimaki status`.
 
 Jellyfin runs **natively in Termux**, not in this container. Do not move it, do
 not `apt install` it, do not try to restart it with systemd.
@@ -553,17 +512,27 @@ not `apt install` it, do not try to restart it with systemd.
 curl -s http://127.0.0.1:8096/System/Info/public
 ```
 
-Logs: `/proc/1/root/data/data/com.termux/files/home/.local/share/jellyfin/log/`
+Logs: `/data/data/com.termux/files/home/.local/share/jellyfin/log/`
 Config: `.../jellyfin/config/`
 
 The API needs a key for anything beyond `/System/Info/public`. Ask the user.
 
 ## Boot behaviour (what comes up on its own)
 
-Two Magisk hooks in `/data/adb/service.d/` do all the work. This device has **no
-lock credential**, so CE storage is available immediately after boot and the
-"wait for unlock" step costs nothing (`storage ready=yes waited=0s`). On a
-device with a PIN that wait is real and can last hours.
+One chain does all the work, and it has only one service manager at the end:
+
+    /data/adb/service.d/99-jellyfin-boot.sh
+      -> Termux RUN_COMMAND -> ~/.termux/boot/start-services
+      -> service-daemon -> runsvdir -> sshd, jellyfin, tmdbproxy, opencode, kimaki
+
+`96-kmsg-capture.sh` (kernel log for reboot forensics) and
+`97-primary-storage-late.sh` (re-applies `storage.xml`) run in parallel with it
+and start nothing.
+
+This device has **no lock credential**, so CE storage is available immediately
+after boot and the "wait for unlock" step costs nothing
+(`storage ready=yes waited=0s`). On a device with a PIN that wait is real and
+can last hours.
 
 ### Jellyfin / sshd - yes
 
@@ -579,42 +548,31 @@ launcher restored" while nothing started, and the phone stayed dead until
 Termux was opened by hand. RUN_COMMAND starts the app's service, runs one
 script, and never shows a window.
 
-### OpenCode - yes
+### OpenCode - yes, under runit
 
-`98-opencode-boot.sh`: same two waits -> ask Termux to run
-`~/.opencode-boot.sh` through RUN_COMMAND. That script does, in order:
+There is no separate OpenCode boot hook any more. `runsvdir` supervises
+`/root/bin/opencode-service.sh` (an `sv` service inside the container), which
+runs the official singleton:
 
-1. `su -c 'sh /data/adb/dev-repair.sh'` - bind the phone's `/dev` nodes over
-   the container's `nodev` placeholders
-2. `su -c 'sh /data/adb/oc-binds.sh'` - idempotently bind `/proc`, `/sys`,
-   `/dev`, `/system`, `/data`, `/storage/emulated/0` and the apexes into the
-   rootfs
-3. start `service-daemon` if runit is not already up
-4. `setsid su -c 'opencode-chroot -- /root/.opencode/bin/opencode serve --service'`
-   - the same path the `opencode` command uses: real root, chroot, not
-   `proot-distro login`
-5. poll `/proc/net/tcp` for `:C0DE` (30 s)
+    opencode serve --service        # writes /root/.local/state/opencode/service.json
 
-Listens on `127.0.0.1:49374`.
+That file is how the CLI, the TUI and Kimaki find the *same* server. Never pin a
+port and never start a second server: `--service` is a singleton, and a second
+one exits silently while Kimaki may spawn its own on a different port (this is
+what once produced duplicate servers).
+
+`opencode-service.sh` is a **standby**: if a live process already owns
+`service.json`, it waits instead of fighting, and it restarts the server if it
+exits. Liveness check: read `service.json` and try the port, never match argv.
 
 Why root/chroot and not `proot-distro login`: proot runs as the Termux uid
-(10086) and cannot write the root-owned `~/.local/share/opencode` tree. The
-first boot attempt died with `EACCES: permission denied, mkdir
-'/root/.local/share/opencode/log'` while a manual launch worked. Root can write
-both root- and 10086-owned files, so root is the consistent choice.
-
-Why RUN_COMMAND rather than starting everything from the hook directly: the
-runit services must run as the Termux uid (10086) to see Termux's data and its
-storage view, and RUN_COMMAND is Termux's supported way to run a script in that
-context. The parts that need root escalate with `su`.
+(10086) and cannot write the root-owned `~/.local/share/opencode` tree. Root can
+write both root- and 10086-owned files, so root is the consistent choice.
 
 `opencode-chroot` is **non-destructive**: it skips a bind that already exists
-and only unmounts what it created. Every `su` shares one mount namespace, so
-the old "unmount then rebind" version let a second run (an interactive
-`opencode`, a test) tear `/data` out from under the background server.
-
-OpenCode has no init here - no systemd, no cron - and `service.json` holds only
-a password, no autostart flag. This hook is the only thing that starts it.
+and only unmounts what it created. Every `su` shares one mount namespace, so an
+"unmount then rebind" version lets a second run tear `/data` out from under the
+background server.
 
 ### Kimaki (Discord bridge) - yes
 
@@ -637,9 +595,9 @@ a separate Node process, not an OpenCode feature - it drives the same
 - It writes its own OpenCode plugin shims into
   `~/.config/opencode/plugins/kimaki/` and `.../kimaki-anthropic/` on every
   start; do not hand-edit them, they are regenerated.
-- Started by the same Termux boot script, right after OpenCode is listening
-  (step 3b): `setsid su -c 'opencode-chroot -- /usr/local/bin/kimaki'`, then a
-  40 s poll of `/proc/net/tcp` for `:7524`.
+- Runs as an `sv` service: `/root/bin/kimaki-start.sh` waits for a **live TCP**
+  OpenCode service (a stale `service.json` must not fool it) and then execs the
+  global CLI in the foreground, so runit supervises and retries it.
 - It reconnects to OpenCode by itself, so an OpenCode restart (the guard does
   that) does not need a Kimaki restart. `kimaki status`, `kimaki project list`,
   `kimaki logs`, `kimaki restart` are the useful CLI verbs.
@@ -683,27 +641,36 @@ that process's argv.
 ### Logs and off switches
 
 ```bash
-tail -20 /data/adb/jellyfin-boot.log
-tail -20 /data/adb/opencode-boot.log
+tail -20 /data/adb/jellyfin-boot.log           # 99 hook: boot waits + guard start
 tail -20 /data/adb/jellyfin-guard.log
-tail -20 /proc/1/root/data/data/com.termux/files/home/.opencode-boot.log
+tail -20 /data/data/com.termux/files/home/.termux/boot/boot.log   # start-services
+tail -20 /root/.kimaki/kimaki.log              # Discord bridge (reset each start)
+tail -20 /data/adb/kmsg.log                    # kernel log, reboot forensics
 
-touch /data/adb/opencode-autostart.disabled   # stop auto-start AND the restart
+touch /data/adb/opencode-autostart.disabled   # stop the restart half of the guard
 touch /data/adb/battery-guard.disabled        # allow charging to 100%
 ```
 
-The Termux:Boot app is installed but its receiver has **never fired** on this
-device - no `~/.termux/boot/boot.log` exists. Its hook script
-(`~/.termux/boot/start-services`) is still useful, but it is now triggered
-explicitly through RUN_COMMAND by the Magisk hooks and the guard. Do not rely
-on Termux:Boot itself.
+There is no OpenCode boot log any more: OpenCode is a runit service
+(`/root/bin/opencode-service.sh`), so its output goes to the runit logger
+(`$PREFIX/var/log/opencode/current`).
+
+Termux:Boot is installed and its hook **does** fire now (it is the only
+autostart path); its log is `~/.termux/boot/boot.log`. If that file is missing
+or stale, the RUN_COMMAND from `99-jellyfin-boot.sh` did not arrive: check
+`allow-external-apps` and `/data/adb/jellyfin-boot.log`.
 
 ## Network
 
-- `wlan0` up, `10.231.241.45/24`, RSSI -39, 2.4 GHz ch 6
-- `tun1` up, `100.86.57.18/32` (Tailscale)
-- `rmnet_data*` present but no SIM inserted (`gsm.sim.state=ABSENT,ABSENT`)
-- IPv4 forced for apt via `/etc/apt/apt.conf.d/99nodrop`
+Read the network live, never from a page: `ip addr`, `iw dev wlan0 link`,
+`getprop gsm.sim.state`, `getprop gsm.operator.alpha`, `getprop gsm.network.type`.
+
+`gsm.sim.state` is a **comma-separated list, one entry per slot**:
+`LOADED,ABSENT` means slot 1 loaded and slot 2 empty. It is not a single status
+value, and reading it as one word inverts the meaning.
+
+- IPv4 forced for apt via `/etc/apt/apt.conf.d/99nodrop` (some lookups return
+  IPv6 only, and there is no IPv6 route).
 
 ## Packages
 
@@ -713,8 +680,8 @@ on Termux:Boot itself.
 
 1. `/data` is live. A careless `rm -rf` is permanent. `ls` before `rm`,
    `cat` before `sed -i`.
-2. Never touch `/proc/1/root/data/adb`, `/proc/1/root/data/system`, or
-   partition tooling unless the user explicitly asks.
+2. Never touch `/data/adb`, `/data/system`, or partition tooling unless the
+   user explicitly asks.
 3. Prefer `am start`, `cmd`, and the Jellyfin API over editing app databases.
 4. The screen, clipboard and notifications are the user's. Act only when asked.
 5. SMS, calls, and anything that reboots, wipes or uninstalls: ask first.
@@ -724,22 +691,22 @@ on Termux:Boot itself.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `cannot execute: required file not found` | Android ELF, no `linker64` in container | `phone-up`; bridge uses `chroot`, not symlinks |
-| `pm`/`am` silently missing between calls | `/proc` unmounted when container relaunched | re-run `phone-up` at the start of every batch |
-| `pm` prints nothing / wrong binary | Termux's own `pm` shim won the `PATH` race | keep wrappers in `/usr/local/bin`; check `command -v pm` |
-| `Read-only file system` writing `/usr/local/bin/*` | wrapper is a symlink into RO `/system`; `>` follows it | `rm -f` the link first (`phone-up` does) |
-| `termux-*` hangs forever | uid 10086 path broken through proot | Termux:API unreliable; use Android CLI |
-| `termux-*: No such file or directory` | wrapper points at the container stub | run `phone-up` |
+| `cannot execute: required file not found` | Android ELF, no `linker64` in container | wrong door: `/system` not bound; re-enter with `opencode`/`debian` |
+| `pm`/`am` silently missing between calls | `/proc` or `/system` not bound | wrong door; re-enter, binds are automatic |
+| `pm` prints nothing / wrong binary | a leftover wrapper shadows `/system/bin/pm` | `command -v pm` must be `/system/bin/pm`; delete any wrapper |
+| `Read-only file system` writing `/usr/local/bin/*` | a leftover wrapper symlinks into read-only `/system`; `>` follows it | `rm -f` the link (there should be no wrappers at all) |
+| `termux-*` hangs forever | `com.termux.api` unavailable (it lives on adoptable storage) | `pidof com.termux.api`; empty = use the Android CLI |
+| `termux-*: No such file or directory` | Termux:API not reachable from this uid | check `pidof com.termux.api`; use `/usr/local/bin/tsu` if needed |
 | `input tap` does nothing, keys still work | SELinux Enforcing blocks injection | should not happen now; check `getenforce`, then `setenforce 0` |
-| `uiautomator dump` exits 0, no file | ART/`app_process` cannot run under proot | use `uidump` (runs it via Termux) |
-| `EACCES: permission denied, posix_spawn '/usr/bin/bash'` | container `/dev/null` is a device node on the `nodev` `/data` mount | `su -c 'sh /data/adb/dev-repair.sh'`, then retry |
-| `/proc` empty, `getprop` fine but `ps`/`ls /proc` empty | container was relaunched | `phone-up` remounts proc/sys |
-| OpenCode gone after reboot | nothing starts the proot container; the Magisk hook does | check `/data/adb/opencode-boot.log`, then `touch`-remove the disable marker |
+| `uiautomator dump` exits 0, no file | run as root inside the chroot it can fail on this ROM | use `uidump` (runs it through Termux RUN_COMMAND) |
+| `EACCES: permission denied, posix_spawn '/usr/bin/bash'` | `/dev` bind missing, `/dev/null` is a plain file | `debian-unbind`, re-enter; never `mknod` |
+| `/proc` empty, `getprop: command not found` | entered through proot | exit and use `opencode` / `debian` |
+| OpenCode gone after reboot | runit unit down or `opencode` never started | `sv status opencode`, then `service.json` and the runit log |
 | boot log says "already running" but nothing listens | liveness matched a shell whose argv contains the pattern | check the socket, not argv: `:C0DE` in `/proc/net/tcp` |
 | nothing starts until Termux is opened by hand | the hook launched `TermuxActivity`, which Android refused in the background | use RUN_COMMAND, not an activity start |
 | `/sdcard` looks empty after reboot | ROM wrote `storage.xml` without `primaryStorageUuid`; null primary matches internal | run `/data/adb/post-fs-data.d/00-primary-storage.sh`, check `/data/adb/primary-storage.log` |
 | boot start dies with `EACCES ... /root/.local/share/opencode` | container entered as uid 10086, tree is root-owned | start through `opencode-chroot` (root), not `proot-distro login` |
-| running server loses `/data` after an `opencode` run | old wrapper unmounted shared binds on exit | use the non-destructive `opencode-chroot`; re-run `/data/adb/oc-binds.sh` |
+| running server loses `/data` after an `opencode` run | a script unmounted shared binds (every `su` shares one namespace) | never unmount; `opencode-chroot` only adds binds |
 | `pgrep -f 'opencode'` returns a pid that is not the server | `pgrep -f` matches its own command line; the CLI shares the name | match argv `*/opencode serve --service` over `/proc/*/cmdline` |
 | autofill sheet seems untouchable | usually the SELinux block above | prove injection on a plain widget first; `KEYCODE_BACK` / DPAD fallback |
 | button ignores tap | stale coordinates after keyboard shift, or focus needed | re-screenshot, then DPAD + `KEYCODE_DPAD_CENTER` |
@@ -749,7 +716,7 @@ on Termux:Boot itself.
 | APK mirror 403 / timeout | bot blocking or IPv6-only DNS | don't scrape mirrors; use an APK on the device or an installed store |
 | `touch: Permission denied` on a photo path | uid 10086 writing to root dirs | write to `$TMPDIR` |
 | screenshot is a tiny black PNG | screen asleep | `input keyevent KEYCODE_WAKEUP` |
-| `mount --bind` "succeeds", nothing changes | proot fakes mount | `chroot /proc/1/root` instead |
-| `/sys` looks empty | sysfs not mounted | `phone-up` |
+| `mount --bind` "succeeds", nothing changes | proot fakes mount | you are in the wrong door; binds are automatic in the chroot |
+| `/sys` looks empty | sysfs not bound | wrong door; re-enter with `opencode` / `debian` |
 | no sound from TTS/media | stream volume is 0 | `termux-volume music 8` |
 | `termux-camera-photo` fails silently | camera busy or screen locked | wake screen, retry |
