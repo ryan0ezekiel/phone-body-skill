@@ -482,6 +482,24 @@ user data. The framework only reads `storage.xml` in its constructor, so the
 only safe way to apply a change is a framework restart (`killall
 system_server`) or a reboot.
 
+The root cause is neutralised by the Magisk module **`keep-primary-storage`**
+(`magisk/keep-primary-storage/` in this repo). It overlays
+`/vendor/bin/init.qcom.early_boot.sh` with the same script, except the final
+`rm -rf /data/system/storage.xml` runs only when a guard file exists:
+
+```sh
+if [ -e /data/adb/primary-storage.disabled ]; then
+    rm -rf /data/system/storage.xml
+fi
+```
+
+So the vendor `on early-boot` step can no longer delete the file between
+`post-fs-data` and `late_start`, and the hooks above only have to keep the
+content and the metadata correct. Install it like any module (copy the folder to
+`/data/adb/modules/keep-primary-storage`), then reboot. Verify on the next boot
+with `grep late-pre /data/adb/primary-storage.log` - `storage.xml` must still be
+present before `late_start` runs.
+
 ## Services (runit, on the Termux side)
 
 ```bash

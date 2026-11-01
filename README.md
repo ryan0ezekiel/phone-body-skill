@@ -28,6 +28,7 @@ agent does not spend a session rediscovering it.
 | File | Purpose |
 |---|---|
 | `SKILL.md` | The skill itself: hardware inventory, capability cookbook, failure table |
+| `magisk/keep-primary-storage/` | Magisk module: neutralises the vendor `rm -rf` of `storage.xml` |
 | `scripts/uidump.sh` | Dumps the Android view hierarchy (text + exact bounds) via Termux RUN_COMMAND |
 | `scripts/uitap.sh` | Taps the best-matching view by text/content-desc |
 | `scripts/opencode-chroot.sh` | Enters the container as real root with non-destructive binds; used by `opencode` and `debian` |
@@ -112,6 +113,19 @@ chmod 755 /data/adb/service.d/97-primary-storage-late.sh
 The hook enforces `1000:1000`, `600` and `system_data_file` on every run, not
 just the content: an unreadable `storage.xml` makes `system_server` silently
 fall back to a null primary and rewrite the file without the attribute.
+
+Install the Magisk module too, or the vendor early-boot step deletes the file
+again on every boot:
+
+```bash
+cp -r magisk/keep-primary-storage /data/adb/modules/keep-primary-storage
+reboot   # the module is picked up on the next boot
+```
+
+The module overlays `/vendor/bin/init.qcom.early_boot.sh` and wraps its final
+`rm -rf /data/system/storage.xml` in a guard check, so the deletion only happens
+when `/data/adb/primary-storage.disabled` exists. Confirm after the reboot:
+`grep late-pre /data/adb/primary-storage.log` still shows the file present.
 
 
 ## The bridge in one paragraph

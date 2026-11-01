@@ -1,0 +1,6 @@
+id=keep-primary-storage
+name=Keep adopted SD as primary storage
+version=1.0
+versionCode=1
+author=opencode
+description=Neutralizes the Realme/Qualcomm early-boot "rm -rf /data/system/storage.xml" so the adopted SD stays primary storage.
