@@ -257,6 +257,19 @@ termux-telephony-call +91XXXXXXXXXX
 SMS and calls leave the device and cannot be recalled. Confirm the number and
 the text with the user first, unless they already stated both.
 
+Reading an OTP out of the SMS database is more reliable than `termux-sms-list`
+(which hangs when `com.termux.api` is missing). Work as root, read-only:
+
+```bash
+DB=/data/data/com.android.providers.telephony/databases/mmssms.db
+sqlite3 "file:$DB?mode=ro" \
+  "select _id, datetime(date/1000,'unixepoch'), address, body from sms order by date desc limit 3;"
+```
+
+OTPs arrive here for anything that texts this number. Do not assume a service
+texts, though: Telegram mail it to the account email instead (see the vault log
+for 2026-11-02).
+
 ### Apps and UI
 
 ```bash
@@ -306,6 +319,53 @@ Animation scales are **0.5** (`window_animation_scale`,
 coordinates going stale mid-transition while keeping the UI feeling normal;
 0 was tested and is not required. The default 1.0 works but transitions can
 swallow taps.
+
+#### Root-checked apps, and web flows that hand off to an app
+
+Some apps refuse to run on this phone and say so outright. Instamart
+(`in.swiggy.android.instamart`) opens straight into
+`in.swiggy.android.systemcheck.ui.SystemCheckActivity`:
+
+```
+Security issue identified
+block access via unsecured devices or apps
+To order, go to www.swiggy.com or use app on another phone.
+```
+
+No dismiss button, no bypass. That is a dead end for the app - do not spend
+taps looking for one. Ordering has to happen on the web.
+
+**The trap:** a hostile app still installed hijacks the web flow. Chrome shows
+an in-page "Open in app for better offers" banner, and after the login OTP the
+site redirects to its custom scheme, the app relaunches, and you land back on
+the block screen with the web session gone.
+
+Remove the app from the loop **before** starting the web flow:
+
+```bash
+pm disable-user --user 0 in.swiggy.android.instamart   # inert, still installed
+# ... drive the web flow ...
+pm enable in.swiggy.android.instamart                  # restore
+```
+
+A disabled package starts no components, so its scheme resolves to nothing and
+Chrome stays on the page. Uninstalling works too (and is the variant that has
+actually been exercised on this device); `pm disable-user` is the reversible
+one, standard Android behaviour, not yet re-tested here because the app was
+already removed.
+
+`pm set-app-links` is **not** a substitute: it only governs `https` domains an
+app declared with `autoVerify`, and does nothing for custom schemes such as
+`swiggy://`.
+
+After every redirect-prone step confirm who owns the screen:
+
+```bash
+dumpsys window | grep -m1 mCurrentFocus
+```
+
+If the native app appeared, the web session is dead - disable the app and redo
+the flow from the login step, do not try to tap your way back.
 
 #### When touch injection fails
 
