@@ -583,6 +583,31 @@ status` reports the pid of the `su` wrapper, not the chrooted daemon, so for
 `opencode` read `/root/.local/state/opencode/service.json` and for `kimaki` run
 `kimaki status`.
 
+#### The `down` file is why a unit never comes back
+
+`sv down <unit>` drops a **`down` file** in the service directory. That file
+survives reboots: `runsvdir` skips the unit at every boot until the file is
+gone. This is the trap that stopped sshd on 2026-11-04 - a `down` file from
+2026-10-27 left port 8022 closed after every reboot, and clients got
+`connection refused` for days.
+
+`sv status` shows it as `down: <unit>: ...`, and the unit's `log` service keeps
+running, so the service looks half-alive. `sv up` **does not** clear the file -
+verified on `ssh-agent`, which came up and still printed `normally down`:
+
+```bash
+SVDIR=/data/data/com.termux/files/usr/var/service
+ls $SVDIR/sshd/down            # absent = will autostart; present = will not
+rm $SVDIR/sshd/down && sv up sshd
+```
+
+Also export `SVDIR` first: without it every `sv` call fails with
+`unable to change to service directory`. `ssh-agent` and any other
+deliberately-off unit keep their `down` file on purpose - do not delete those.
+
+Termux sshd listens on **8022**, not 22, and takes only the ed25519 key in
+`/data/data/com.termux/files/home/.ssh/authorized_keys`.
+
 Jellyfin runs **natively in Termux**, not in this container. Do not move it, do
 not `apt install` it, do not try to restart it with systemd.
 
