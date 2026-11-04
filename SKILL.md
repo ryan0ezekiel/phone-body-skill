@@ -608,6 +608,20 @@ deliberately-off unit keep their `down` file on purpose - do not delete those.
 Termux sshd listens on **8022**, not 22, and takes only the ed25519 key in
 `/data/data/com.termux/files/home/.ssh/authorized_keys`.
 
+Tailscale is an **app** (`com.tailscale.ipn`), not a CLI: there is no
+`tailscale` or `tailscaled` binary, no unix socket, and the state is not in a
+readable `tailscaled.state`. To answer "which machines are online":
+
+1. `am start -n com.tailscale.ipn/.MainActivity` and read the machine list with
+   `uidump` (name + `100.x` address per row). The online flag is a **coloured
+   dot only** - green online, grey offline - so confirm with a screenshot.
+2. Verify with `ping -c1 -W2 100.x.y.z`: online peers answer ICMP over the
+   tailnet, offline ones drop 100%. That is the part that is evidence; the dot
+   is only presentation.
+
+The tailnet address of this phone is on `tun1` (`ip -4 addr show tun1`). Peer
+lists are live state - never cache them.
+
 Jellyfin runs **natively in Termux**, not in this container. Do not move it, do
 not `apt install` it, do not try to restart it with systemd.
 
